@@ -15,8 +15,7 @@ const MediasoupClientComponent = () => {
   ).current;
   const deviceRef = useRef<mediasoupClient.Device | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  // const localStream = useRef<MediaStream | null>(null)
-  const [remoteProducers, setRemoteProducers] = useState<any[]>([]); // [{ producerId, socketId }]
+  const [remoteProducers, setRemoteProducers] = useState<any[]>([]);
 
   let params: any = {
     encodings: [
@@ -31,20 +30,24 @@ const MediasoupClientComponent = () => {
 
   useEffect(() => {
     const init = async (rtpCapabilities: any) => {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
-      setLocalStream(stream);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
+        setLocalStream(stream);
 
-      const device = new mediasoupClient.Device();
-      await device.load({ routerRtpCapabilities: rtpCapabilities });
-      deviceRef.current = device;
+        const device = new mediasoupClient.Device();
+        await device.load({ routerRtpCapabilities: rtpCapabilities });
+        deviceRef.current = device;
 
-      const track = stream.getVideoTracks()[0];
-      params = { track, ...params };
-      const transport = await createSendTransport(device);
-      await connectSendTransport(transport)
+        const track = stream.getVideoTracks()[0];
+        params = { track, ...params };
+        const transport = await createSendTransport(device);
+        await connectSendTransport(transport);
+      } catch (error) {
+        console.error("Error in init:", error);
+      }
     };
 
     socket.emit("getRtpCapabilities", (data: any) => {
@@ -52,36 +55,61 @@ const MediasoupClientComponent = () => {
     });
 
     socket.on("newProducer", ({ producerId, socketId }) => {
-      setRemoteProducers((prev) => [...prev, { producerId, socketId }]);
+      console.log("New producer:", producerId, "from socket:", socketId);
+      setRemoteProducers((prev) => {
+        // Check if producer already exists
+        const exists = prev.some(p => p.producerId === producerId);
+        if (!exists) {
+          return [...prev, { producerId, socketId }];
+        }
+        return prev;
+      });
     });
+
     socket.on("connectionSuccess", ({ producers }) => {
-      console.log({producers })
-      setRemoteProducers(producers)
-      // console.log({ producers });
+      console.log("Connection success, existing producers:", producers);
+      setRemoteProducers(producers);
     });
+
+    socket.on("producerClosed", ({ socketId }) => {
+      console.log("Producer closed for socket:", socketId);
+      setRemoteProducers((prev) => 
+        prev.filter(p => p.socketId !== socketId)
+      );
+    });
+
+    // Cleanup on unmount
+    return () => {
+      socket.disconnect();
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+      }
+    };
   }, []);
 
-  const createSendTransport = (device) => {
-    return new Promise((resolve) => {
+  const createSendTransport = (device: mediasoupClient.Device) => {
+    return new Promise((resolve, reject) => {
       socket.emit(
         "createWebRtcTransport",
         { sender: true },
         ({ params: serverParams }: any) => {
           if (serverParams.error) {
-            console.log(serverParams.error);
+            console.error("Error creating send transport:", serverParams.error);
+            reject(serverParams.error);
             return;
           }
 
-          console.log(serverParams);
+          console.log("Send transport params:", serverParams);
           const producerTransport = device.createSendTransport(serverParams);
 
           producerTransport.on(
             "connect",
             async ({ dtlsParameters }, callback, errback) => {
               try {
-                await socket.emit("transportConnect", { dtlsParameters });
+                socket.emit("transportConnect", { dtlsParameters });
                 callback();
               } catch (error: any) {
+                console.error("Error in transport connect:", error);
                 errback(error);
               }
             }
@@ -89,53 +117,72 @@ const MediasoupClientComponent = () => {
 
           producerTransport.on(
             "produce",
-            async (parameters, callback, errback) => {
+            (parameters, callback, errback) => {
               try {
-                await socket.emit(
+                socket.emit(
                   "transportProduce",
                   {
                     kind: parameters.kind,
                     rtpParameters: parameters.rtpParameters,
                     appData: parameters.appData,
                   },
-                  ({ id }: any) => {
-                    callback({ id });
+                  ({ id, error }: any) => {
+                    if (error) {
+                      console.error("Error in transport produce:", error);
+                      errback(new Error(error));
+                    } else {
+                      callback({ id });
+                    }
                   }
                 );
               } catch (error: any) {
+                console.error("Error in produce event:", error);
                 errback(error);
               }
             }
           );
-          resolve(producerTransport)
+
+          producerTransport.on("connectionstatechange", (state) => {
+            console.log("Producer transport connection state:", state);
+          });
+
+          resolve(producerTransport);
         }
       );
     });
   };
 
-  const connectSendTransport = async (producerTransport) => {
-    const producer = await producerTransport.produce(params);
+  const connectSendTransport = async (producerTransport: any) => {
+    try {
+      const producer = await producerTransport.produce(params);
 
-    producer.on("trackended", () => {
-      console.log("track ended");
-    });
+      producer.on("trackended", () => {
+        console.log("track ended");
+      });
 
-    producer.on("transportclose", () => {
-      console.log("transport ended");
-    });
+      producer.on("transportclose", () => {
+        console.log("transport ended");
+      });
+
+      console.log("Producer created successfully:", producer.id);
+    } catch (error) {
+      console.error("Error connecting send transport:", error);
+    }
   };
 
   return (
     <div className="grid grid-cols-3 gap-4 p-4">
       {localStream && <StreamOutput stream={localStream} isLocal />}
-      {remoteProducers.length && deviceRef.current && remoteProducers.map(({ producerId }) => (
-        <RemoteStream
-          key={producerId}
-          socket={socket}
-          device={deviceRef.current!}
-          producerId={producerId}
-        />
-      ))}
+      {remoteProducers.length > 0 && deviceRef.current && 
+        remoteProducers.map(({ producerId, socketId }) => (
+          <RemoteStream
+            key={`${producerId}-${socketId}`}
+            socket={socket}
+            device={deviceRef.current!}
+            producerId={producerId}
+          />
+        ))
+      }
     </div>
   );
 };
