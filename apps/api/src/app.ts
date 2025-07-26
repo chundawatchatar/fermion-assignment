@@ -1,157 +1,215 @@
-import express, { Request, Response, NextFunction } from 'express';
-import { createServer } from 'http';
-import { WebSocketServer, WebSocket } from 'ws';
-import { IncomingMessage } from 'http';
+import express from "express";
+import { createServer } from "http";
+import { Server } from "socket.io";
+import * as mediasoup from "mediasoup";
 
-const app: express.Application = express();
+const PORT = 3001;
+const app = express();
 const server = createServer(app);
-const wss = new WebSocketServer({ server });
-
-const PORT = process.env.PORT || 3001;
-
-// Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// CORS middleware
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
-  }
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
+  path: "/ws",
 });
 
-// REST API Routes
-app.get('/', (req, res) => {
-  res.json({ 
-    message: 'Backend server is running!',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      health: '/health',
-      api: '/api'
-    }
+app.get("/", (req, res) => {
+  res.send("Hello from mediasoup app!");
+});
+
+let worker: any;
+let router: any;
+let producerTransport: any;
+let consumerTransport: any;
+let producer: any;
+let consumer: any;
+
+let producers: any = [];
+const mediaCodecs = [
+  {
+    kind: "audio",
+    mimeType: "audio/opus",
+    clockRate: 48000,
+    channels: 2,
+  },
+  {
+    kind: "video",
+    mimeType: "video/VP8",
+    clockRate: 90000,
+    parameters: {
+      "x-google-start-bitrate": 1000,
+    },
+  },
+];
+
+(async () => {
+  worker = await mediasoup.createWorker({
+    rtcMinPort: 2000,
+    rtcMaxPort: 2020,
   });
-});
+  console.log(`worker pid ${worker.pid}`);
 
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
+  worker.on("died", () => {
+    // This implies something serious happened, so kill the application
+    console.error("mediasoup worker has died");
+    setTimeout(() => process.exit(1), 2000); // exit in 2 seconds
   });
-});
 
+  router = await worker.createRouter({ mediaCodecs });
+})();
 
-// WebSocket handling
-wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
-  console.log(`New WebSocket connection from ${req.socket.remoteAddress}`);
-  
-  // Send welcome message
-  ws.send(JSON.stringify({
-    type: 'welcome',
-    message: 'Connected to WebSocket server',
-    timestamp: new Date().toISOString()
-  }));
-  
-  // Handle incoming messages
-  ws.on('message', (data: Buffer) => {
+io.on("connection", async (socket) => {
+  console.log(`New WebSocket connection: ${socket.id}`);
+
+  socket.emit("connectionSuccess", {
+    producers,
+  });
+
+  socket.on("disconnect", () => {
+    producers = producers.filter((p: any) => p.socketId !== socket.id)
+    console.log(`Disconnect: ${socket.id}`);
+  });
+
+  socket.on("getRtpCapabilities", (callback) => {
+    const rtpCapabilities = router.rtpCapabilities;
+    callback({ rtpCapabilities });
+  });
+
+  socket.on("createWebRtcTransport", async ({ sender }, callback) => {
+    console.log(`Is this a sender request? ${sender}`);
+    if (sender) producerTransport = await createWebRtcTransport(callback);
+    else consumerTransport = await createWebRtcTransport(callback);
+  });
+
+  socket.on("transportConnect", async ({ dtlsParameters }) => {
+    console.log("transportConnect")
+    await producerTransport.connect({ dtlsParameters });
+  });
+
+  socket.on("transportProduce", async ({ kind, rtpParameters, appData }, callback) => {
+    console.log("transportProduce")
+    producer = await producerTransport.produce({
+      kind,
+      rtpParameters,
+    });
+
+    console.log("Producer ID: ", producer.id, producer.kind);
+
+    producer.on("transportclose", () => {
+      console.log("transport for this producer closed ");
+      producer.close();
+    });
+
+    producers.push({
+      producerId: producer.id,
+      socketId: socket.id,
+    });
+
+    callback({
+      id: producer.id,
+    });
+  });
+
+  socket.on("transportRecvConnect", async ({ dtlsParameters }) => {
+    await consumerTransport.connect({ dtlsParameters });
+  });
+
+  socket.on("consume", async ({ rtpCapabilities }, callback) => {
     try {
-      const message = JSON.parse(data.toString());
-      console.log('Received message:', message);
-      
-      // Echo the message back to the client
-      ws.send(JSON.stringify({
-        type: 'echo',
-        originalMessage: message,
-        timestamp: new Date().toISOString()
-      }));
-      
-      // Broadcast to all connected clients
-      wss.clients.forEach((client: WebSocket) => {
-        if (client !== ws && client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify({
-            type: 'broadcast',
-            message: message,
-            timestamp: new Date().toISOString()
-          }));
-        }
+      if (
+        router.canConsume({
+          producerId: producer.id,
+          rtpCapabilities,
+        })
+      ) {
+        // transport can now consume and return a consumer
+        consumer = await consumerTransport.consume({
+          producerId: producer.id,
+          rtpCapabilities,
+          paused: true,
+        });
+
+        consumer.on("transportclose", () => {
+          console.log("transport close from consumer");
+        });
+
+        consumer.on("producerclose", () => {
+          console.log("producer of consumer closed");
+        });
+
+        const params = {
+          id: consumer.id,
+          producerId: producer.id,
+          kind: consumer.kind,
+          rtpParameters: consumer.rtpParameters,
+        };
+
+        callback({ params });
+      }
+    } catch (error: any) {
+      console.log(error.message);
+      callback({
+        params: {
+          error: error,
+        },
       });
-      
-    } catch (error) {
-      console.error('Error parsing message:', error);
-      ws.send(JSON.stringify({
-        type: 'error',
-        message: 'Invalid JSON format',
-        timestamp: new Date().toISOString()
-      }));
     }
   });
-  
-  // Handle connection close
-  ws.on('close', (code: number, reason: Buffer) => {
-    console.log(`WebSocket connection closed: ${code} ${reason.toString()}`);
-  });
-  
-  // Handle errors
-  ws.on('error', (error: Error) => {
-    console.error('WebSocket error:', error);
-  });
-  
-  // Send periodic ping to keep connection alive
-  const pingInterval = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
-    } else {
-      clearInterval(pingInterval);
-    }
-  }, 30000);
-});
 
-// Error handling middleware
-app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  console.error('Error:', err.stack);
-  res.status(500).json({ 
-    error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
+  socket.on("consumerResume", async () => {
+    console.log("consumer resume");
+    await consumer.resume();
   });
 });
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    error: 'Route not found',
-    path: req.originalUrl,
-    method: req.method
-  });
-});
+const createWebRtcTransport = async (callback: any) => {
+  try {
+    const webRtcTransport_options = {
+      listenIps: [
+        {
+          ip: "0.0.0.0",
+          announcedIp: "127.0.0.1",
+        },
+      ],
+      enableUdp: true,
+      enableTcp: true,
+      preferUdp: true,
+    };
 
-// Start the server
+    let transport = await router.createWebRtcTransport(webRtcTransport_options);
+    console.log(`transport id: ${transport.id}`);
+
+    transport.on("dtlsstatechange", (dtlsState: any) => {
+      if (dtlsState === "closed") {
+        transport.close();
+      }
+    });
+
+    transport.on("close", () => {
+      console.log("transport closed");
+    });
+
+    callback({
+      params: {
+        id: transport.id,
+        iceParameters: transport.iceParameters,
+        iceCandidates: transport.iceCandidates,
+        dtlsParameters: transport.dtlsParameters,
+      },
+    });
+
+    return transport;
+  } catch (error: any) {
+    console.log(error);
+    callback({
+      params: {
+        error: error,
+      },
+    });
+  }
+};
+
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📡 WebSocket server ready on ws://localhost:${PORT}`);
-  console.log(`📊 Health check available at http://localhost:${PORT}/health`);
+  console.log(`🚀  Server listening on http://localhost:${PORT}`);
 });
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
-});
-
-export default app;
