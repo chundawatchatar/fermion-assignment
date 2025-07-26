@@ -2,6 +2,10 @@ import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import * as mediasoup from "mediasoup";
+import path from "path";
+import cors from "cors"
+
+import { startFFmpeg  } from './ffmpeg'
 
 const PORT = 3001;
 const app = express();
@@ -13,6 +17,10 @@ const io = new Server(server, {
   },
   path: "/ws",
 });
+
+app.use(cors())
+
+app.use("/hls", express.static(path.join(__dirname, '..', "public", "hls")));
 
 app.get("/", (req, res) => {
   res.send("Hello from mediasoup app!");
@@ -85,7 +93,7 @@ io.on("connection", async (socket) => {
 
   socket.on("disconnect", () => {
     console.log(`Disconnect: ${socket.id}`);
-    
+
     // Clean up transports
     const socketTransports = transports.get(socket.id);
     if (socketTransports) {
@@ -96,7 +104,7 @@ io.on("connection", async (socket) => {
         socketTransports.consumerTransport.close();
       }
     }
-    
+
     // Clean up producers
     const socketProducers = producers.get(socket.id);
     if (socketProducers) {
@@ -104,7 +112,7 @@ io.on("connection", async (socket) => {
         producer.close();
       });
     }
-    
+
     // Clean up consumers
     const socketConsumers = consumers.get(socket.id);
     if (socketConsumers) {
@@ -112,7 +120,7 @@ io.on("connection", async (socket) => {
         consumer.close();
       });
     }
-    
+
     // Remove from maps
     transports.delete(socket.id);
     producers.delete(socket.id);
@@ -132,13 +140,13 @@ io.on("connection", async (socket) => {
     try {
       const transport = await createWebRtcTransport(callback);
       const socketTransports = transports.get(socket.id) || {};
-      
+
       if (sender) {
         socketTransports.producerTransport = transport;
       } else {
         socketTransports.consumerTransport = transport;
       }
-      
+
       transports.set(socket.id, socketTransports);
     } catch (error) {
       console.error("Error creating WebRTC transport:", error);
@@ -162,52 +170,59 @@ io.on("connection", async (socket) => {
     }
   });
 
-  socket.on("transportProduce", async ({ kind, rtpParameters, appData }, callback) => {
-    console.log("transportProduce for socket:", socket.id);
-    try {
-      const socketTransports = transports.get(socket.id);
-      if (!socketTransports || !socketTransports.producerTransport) {
-        throw new Error("Producer transport not found");
-      }
+  socket.on(
+    "transportProduce",
+    async ({ kind, rtpParameters, appData }, callback) => {
+      console.log("transportProduce for socket:", socket.id);
+      try {
+        const socketTransports = transports.get(socket.id);
+        if (!socketTransports || !socketTransports.producerTransport) {
+          throw new Error("Producer transport not found");
+        }
 
-      const producer = await socketTransports.producerTransport.produce({
-        kind,
-        rtpParameters,
-      });
+        const producer = await socketTransports.producerTransport.produce({
+          kind,
+          rtpParameters,
+        });
 
-      console.log("Producer ID: ", producer.id, producer.kind);
+        console.log("Producer ID: ", producer.id, producer.kind);
 
-      producer.on("transportclose", () => {
-        console.log("transport for this producer closed");
-        producer.close();
-        
-        // Remove from producers map
+        producer.on("transportclose", () => {
+          console.log("transport for this producer closed");
+          producer.close();
+
+          // Remove from producers map
+          const socketProducers = producers.get(socket.id) || [];
+          const filteredProducers = socketProducers.filter(
+            (p: any) => p.id !== producer.id
+          );
+          producers.set(socket.id, filteredProducers);
+        });
+
+        // Add to producers map
         const socketProducers = producers.get(socket.id) || [];
-        const filteredProducers = socketProducers.filter((p: any) => p.id !== producer.id);
-        producers.set(socket.id, filteredProducers);
-      });
+        socketProducers.push(producer);
+        producers.set(socket.id, socketProducers);
 
-      // Add to producers map
-      const socketProducers = producers.get(socket.id) || [];
-      socketProducers.push(producer);
-      producers.set(socket.id, socketProducers);
+        startFFmpeg(router, producers);
 
-      // Notify other clients about new producer
-      socket.broadcast.emit("newProducer", {
-        producerId: producer.id,
-        socketId: socket.id,
-      });
+        // Notify other clients about new producer
+        socket.broadcast.emit("newProducer", {
+          producerId: producer.id,
+          socketId: socket.id,
+        });
 
-      callback({
-        id: producer.id,
-      });
-    } catch (error: any) {
-      console.error("Error in transportProduce:", error);
-      callback({
-        error: error.message,
-      });
+        callback({
+          id: producer.id,
+        });
+      } catch (error: any) {
+        console.error("Error in transportProduce:", error);
+        callback({
+          error: error.message,
+        });
+      }
     }
-  });
+  );
 
   socket.on("transportRecvConnect", async ({ dtlsParameters }) => {
     console.log("transportRecvConnect for socket:", socket.id);
@@ -222,7 +237,12 @@ io.on("connection", async (socket) => {
   });
 
   socket.on("consume", async ({ rtpCapabilities, producerId }, callback) => {
-    console.log("consume request for producerId:", producerId, "from socket:", socket.id);
+    console.log(
+      "consume request for producerId:",
+      producerId,
+      "from socket:",
+      socket.id
+    );
     try {
       // Find the producer
       let targetProducer: any = null;
@@ -263,7 +283,9 @@ io.on("connection", async (socket) => {
           console.log("producer of consumer closed");
           // Remove from consumers map
           const socketConsumers = consumers.get(socket.id) || [];
-          const filteredConsumers = socketConsumers.filter((c: any) => c.id !== consumer.id);
+          const filteredConsumers = socketConsumers.filter(
+            (c: any) => c.id !== consumer.id
+          );
           consumers.set(socket.id, filteredConsumers);
         });
 
@@ -298,7 +320,7 @@ io.on("connection", async (socket) => {
     try {
       const socketConsumers = consumers.get(socket.id) || [];
       const consumer = socketConsumers.find((c: any) => c.id === consumerId);
-      
+
       if (consumer) {
         await consumer.resume();
       } else {
