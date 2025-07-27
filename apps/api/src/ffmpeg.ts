@@ -10,13 +10,80 @@ interface StreamingSession {
 
 let currentSession: StreamingSession | null = null;
 
+function cleanupHLSFiles(hlsDir: string) {
+  try {
+    if (!fs.existsSync(hlsDir)) {
+      return;
+    }
+
+    const files = fs.readdirSync(hlsDir);
+    
+    files.forEach(file => {
+      const filePath = path.join(hlsDir, file);
+      
+      // Remove .ts segments, .m3u8 playlists, and .sdp files
+      if (file.endsWith('.ts') || file.endsWith('.m3u8') || file.endsWith('.sdp')) {
+        try {
+          fs.unlinkSync(filePath);
+          console.log(`Removed old HLS file: ${file}`);
+        } catch (err) {
+          console.warn(`Failed to remove file ${file}:`, err);
+        }
+      }
+    });
+    
+    console.log('HLS cleanup completed');
+  } catch (error) {
+    console.error('HLS cleanup failed:', error);
+  }
+}
+
 async function createPlainTransport(router) {
   const transport = await router.createPlainTransport({
     listenIp: "127.0.0.1",
-    rtcpMux: true,     // required for single port RTP+RTCP
-    comedia: false,    // we will connect it manually
+    rtcpMux: true,
+    comedia: false,
   });
   return transport;
+}
+
+// Generate SDP based on actual RTP parameters
+function generateSDP(rtpParameters: any, port: number): string {
+  // Look for VP8 or H.264 codec
+  const videoCodec = rtpParameters.codecs.find(
+    codec => codec.mimeType.toLowerCase() === 'video/vp8' || 
+             codec.mimeType.toLowerCase() === 'video/h264'
+  );
+  
+  if (!videoCodec) {
+    throw new Error('No supported video codec (VP8/H.264) found in RTP parameters');
+  }
+
+  const payloadType = videoCodec.payloadType;
+  const clockRate = videoCodec.clockRate;
+  const codecName = videoCodec.mimeType.split('/')[1].toUpperCase(); // VP8 or H264
+  
+  console.log('Using codec:', codecName, 'payload type:', payloadType, 'clock rate:', clockRate);
+
+  const sdpLines = [
+    "v=0",
+    "o=- 0 0 IN IP4 127.0.0.1",
+    "s=MediaSoup RTP Stream",
+    "c=IN IP4 127.0.0.1",
+    "t=0 0",
+    `m=video ${port} RTP/AVP ${payloadType}`,
+    `a=rtpmap:${payloadType} ${codecName}/${clockRate}`,
+  ];
+
+  // Add fmtp line if there are parameters
+  if (videoCodec.parameters && Object.keys(videoCodec.parameters).length > 0) {
+    const fmtpParams = Object.entries(videoCodec.parameters)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(';');
+    sdpLines.push(`a=fmtp:${payloadType} ${fmtpParams}`);
+  }
+
+  return sdpLines.join('\n');
 }
 
 async function cleanupSession(session: StreamingSession) {
@@ -40,6 +107,7 @@ export async function startFFmpeg(router, producers) {
     }
 
     const hlsDir = path.join(__dirname, "..", "public", "hls");
+    cleanupHLSFiles(hlsDir)
     if (!fs.existsSync(hlsDir)) {
       fs.mkdirSync(hlsDir, { recursive: true });
     }
@@ -55,10 +123,12 @@ export async function startFFmpeg(router, producers) {
       throw new Error("No video producer found");
     }
 
+    console.log('Found video producer:', videoProducer.id);
+
     // Create plain transport
     const plainTransport = await createPlainTransport(router);
 
-    // Define fixed FFmpeg port (for receiving RTP)
+    // Define fixed FFmpeg port
     const ffmpegRtpPort = 5004;
 
     // Connect transport to FFmpeg
@@ -76,37 +146,49 @@ export async function startFFmpeg(router, producers) {
       paused: true,
     });
 
-    await consumer.resume();
-    console.log("Consumer resumed");
+    // Get actual RTP parameters
+    const rtpParameters = consumer.rtpParameters;
+    console.log('RTP Parameters:', JSON.stringify(rtpParameters, null, 2));
 
-    // Write SDP file
+    // Generate proper SDP file
     const sdpPath = path.join(hlsDir, "video.sdp");
-    const sdpContent = `
-v=0
-o=- 0 0 IN IP4 127.0.0.1
-s=FFmpeg RTP Input
-c=IN IP4 127.0.0.1
-t=0 0
-m=video 5004 RTP/AVP 101
-a=rtpmap:101 H264/90000
-    `.trim();
-
+    const sdpContent = generateSDP(rtpParameters, ffmpegRtpPort);
+    
+    console.log('Generated SDP:');
+    console.log(sdpContent);
+    
     fs.writeFileSync(sdpPath, sdpContent);
 
-    // Start FFmpeg to listen on port 5004
+    // Resume consumer to start sending RTP
+    await consumer.resume();
+    console.log("Consumer resumed, RTP should be flowing...");
+
+    // Wait a moment for RTP to start
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Start FFmpeg with VP8 to H.264 transcoding
     const ffmpegArgs = [
       "-protocol_whitelist", "file,udp,rtp",
-      "-i", path.join(hlsDir, "video.sdp"),
-      "-c:v", "copy",
-      "-an",
+      "-f", "sdp",
+      "-i", sdpPath,
+      "-c:v", "libx264", // Transcode VP8 to H.264 for HLS
+      "-preset", "ultrafast",
+      "-tune", "zerolatency",
+      "-profile:v", "baseline", // Better compatibility
+      "-level", "3.1",
+      "-pix_fmt", "yuv420p", // Ensure compatible pixel format
+      "-g", "30", // GOP size
+      "-an", // No audio
       "-f", "hls",
       "-hls_time", "2",
       "-hls_list_size", "10",
-      "-hls_flags", "delete_segments",
+      "-hls_flags", "delete_segments+independent_segments",
+      "-hls_start_number_source", "datetime",
       "-y",
       path.join(hlsDir, "stream.m3u8"),
     ];
 
+    console.log('Starting FFmpeg with command:', 'ffmpeg', ffmpegArgs.join(' '));
 
     const ffmpegProcess = spawn("ffmpeg", ffmpegArgs);
 
@@ -118,10 +200,10 @@ a=rtpmap:101 H264/90000
 
     ffmpegProcess.stderr.on("data", (data: Buffer) => {
       const output = data.toString();
-      if (output.toLowerCase().includes("error")) {
-        console.error(`FFmpeg error: ${output}`);
-      } else {
-        console.log(`FFmpeg log: ${output}`);
+      // Only log important messages to reduce noise
+      if (output.includes('error') || output.includes('Error') || 
+          output.includes('frame=') || output.includes('time=')) {
+        console.log(`FFmpeg: ${output.trim()}`);
       }
     });
 
