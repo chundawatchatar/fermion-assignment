@@ -18,15 +18,15 @@ const StreamOutput: React.FC<Props> = ({ stream, isLocal = false }) => {
   }, [stream]);
 
   return (
-    <div className="rounded-xl overflow-hidden border p-2 w-80">
+    <div className="flex flex-col items-center bg-gray-100 rounded-lg p-2 shadow">
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted={isLocal}
-        className="w-full h-48 object-cover"
+        className="w-full aspect-video bg-black rounded-lg"
       />
-      <div className="text-center text-xs mt-1">
+      <div className="mt-2 text-xs text-gray-700 font-mono">
         {isLocal ? "You" : "Remote User"}
       </div>
     </div>

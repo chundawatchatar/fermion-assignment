@@ -11,7 +11,7 @@ interface StreamingSession {
 
 let currentSession: StreamingSession | null = null;
 
-function cleanupHLSFiles(hlsDir: string) {
+function cleanupHLSFiles(hlsDir: string): void {
   try {
     if (!fs.existsSync(hlsDir)) {
       return;
@@ -39,7 +39,7 @@ function cleanupHLSFiles(hlsDir: string) {
   }
 }
 
-async function createPlainTransport(router: mediasoup.types.Router) {
+async function createPlainTransport(router: mediasoup.types.Router): Promise<any> {
   const transport = await router.createPlainTransport({
     listenIp: "127.0.0.1",
     rtcpMux: true,
@@ -87,7 +87,7 @@ function generateSDP(rtpParameters: any, port: number): string {
   return sdpLines.join('\n');
 }
 
-async function cleanupSession(session: StreamingSession) {
+async function cleanupSession(session: StreamingSession): Promise<void> {
   if (session.ffmpegProcess && !session.ffmpegProcess.killed) {
     session.ffmpegProcess.kill("SIGTERM");
   }
@@ -99,7 +99,7 @@ async function cleanupSession(session: StreamingSession) {
   }
 }
 
-export async function startFFmpeg(router: mediasoup.types.Router, producers) {
+export async function startFFmpeg(router: mediasoup.types.Router, producers: Map<string, any[]>): Promise<void> {
   try {
     console.log("Starting FFmpeg...");
 
@@ -231,7 +231,7 @@ export async function startFFmpeg(router: mediasoup.types.Router, producers) {
   }
 }
 
-export async function stopFFmpeg() {
+export async function stopFFmpeg(): Promise<void> {
   if (currentSession) {
     await cleanupSession(currentSession);
     currentSession = null;

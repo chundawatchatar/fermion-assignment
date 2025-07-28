@@ -30,9 +30,13 @@ let worker: mediasoup.types.Worker;
 let router: mediasoup.types.Router;
 
 // Store transports and producers per socket
-const transports = new Map(); // socketId -> { producerTransport, consumerTransport }
-const producers = new Map(); // socketId -> [{ id, kind }]
-const consumers = new Map(); // socketId -> [{ id, producerId }]
+type TransportMap = Map<string, { producerTransport?: any; consumerTransport?: any }>;
+type ProducerMap = Map<string, any[]>;
+type ConsumerMap = Map<string, any[]>;
+
+const transports: TransportMap = new Map(); // socketId -> { producerTransport, consumerTransport }
+const producers: ProducerMap = new Map(); // socketId -> [{ id, kind }]
+const consumers: ConsumerMap = new Map(); // socketId -> [{ id, producerId }]
 
 const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
   {
@@ -332,7 +336,7 @@ io.on("connection", async (socket) => {
   });
 });
 
-const createWebRtcTransport = async (callback: any) => {
+const createWebRtcTransport = async (callback: (params: any) => void): Promise<any> => {
   try {
     const webRtcTransport_options = {
       listenIps: [

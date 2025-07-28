@@ -1,7 +1,7 @@
-'use client'
+"use client";
 
-import Hls from 'hls.js';
-import { useEffect, useRef } from 'react';
+import Hls from "hls.js";
+import { useEffect, useRef } from "react";
 
 export default function WatchPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -18,23 +18,30 @@ export default function WatchPage() {
           liveMaxLatencyDurationCount: 3,
           maxBufferLength: 10,
         });
-        
-        hls.loadSource('http://localhost:3001/hls/stream.m3u8');
-        hls.attachMedia(videoRef.current!);
-        
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          // Jump to live edge and play
-          videoRef.current!.currentTime = videoRef.current!.duration;
-          videoRef.current!.play();
-        });
+        try {
+          hls.loadSource("http://localhost:3001/hls/stream.m3u8");
+          hls.attachMedia(videoRef.current!);
+
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            // Jump to live edge and play
+            videoRef.current!.currentTime = videoRef.current!.duration;
+            videoRef.current!.play();
+          });
+        } catch (error) {}
       }
     }, 3000);
   }, []);
 
   return (
     <div className="w-full h-screen flex justify-center items-center bg-black">
-      <div className='max-w-2xl'>
-        <video ref={videoRef} controls autoPlay muted className="w-full rounded-xl" />
+      <div className="max-w-2xl">
+        <video
+          ref={videoRef}
+          controls
+          autoPlay
+          muted
+          className="w-full rounded-xl"
+        />
       </div>
     </div>
   );

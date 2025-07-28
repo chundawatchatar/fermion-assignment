@@ -58,7 +58,7 @@ const MediasoupClientComponent = () => {
       console.log("New producer:", producerId, "from socket:", socketId);
       setRemoteProducers((prev) => {
         // Check if producer already exists
-        const exists = prev.some(p => p.producerId === producerId);
+        const exists = prev.some((p) => p.producerId === producerId);
         if (!exists) {
           return [...prev, { producerId, socketId }];
         }
@@ -73,16 +73,14 @@ const MediasoupClientComponent = () => {
 
     socket.on("producerClosed", ({ socketId }) => {
       console.log("Producer closed for socket:", socketId);
-      setRemoteProducers((prev) => 
-        prev.filter(p => p.socketId !== socketId)
-      );
+      setRemoteProducers((prev) => prev.filter((p) => p.socketId !== socketId));
     });
 
     // Cleanup on unmount
     return () => {
       socket.disconnect();
       if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
+        localStream.getTracks().forEach((track) => track.stop());
       }
     };
   }, []);
@@ -115,32 +113,29 @@ const MediasoupClientComponent = () => {
             }
           );
 
-          producerTransport.on(
-            "produce",
-            (parameters, callback, errback) => {
-              try {
-                socket.emit(
-                  "transportProduce",
-                  {
-                    kind: parameters.kind,
-                    rtpParameters: parameters.rtpParameters,
-                    appData: parameters.appData,
-                  },
-                  ({ id, error }: any) => {
-                    if (error) {
-                      console.error("Error in transport produce:", error);
-                      errback(new Error(error));
-                    } else {
-                      callback({ id });
-                    }
+          producerTransport.on("produce", (parameters, callback, errback) => {
+            try {
+              socket.emit(
+                "transportProduce",
+                {
+                  kind: parameters.kind,
+                  rtpParameters: parameters.rtpParameters,
+                  appData: parameters.appData,
+                },
+                ({ id, error }: any) => {
+                  if (error) {
+                    console.error("Error in transport produce:", error);
+                    errback(new Error(error));
+                  } else {
+                    callback({ id });
                   }
-                );
-              } catch (error: any) {
-                console.error("Error in produce event:", error);
-                errback(error);
-              }
+                }
+              );
+            } catch (error: any) {
+              console.error("Error in produce event:", error);
+              errback(error);
             }
-          );
+          });
 
           producerTransport.on("connectionstatechange", (state) => {
             console.log("Producer transport connection state:", state);
@@ -170,19 +165,29 @@ const MediasoupClientComponent = () => {
     }
   };
 
+  function getGridCols(count: number) {
+    if (count <= 1) return "grid-cols-1";
+    if (count === 2) return "grid-cols-2";
+    if (count <= 4) return "grid-cols-2 md:grid-cols-2";
+    if (count <= 6) return "grid-cols-2 md:grid-cols-3";
+    if (count <= 9) return "grid-cols-2 md:grid-cols-3 lg:grid-cols-3";
+    return "grid-cols-2 md:grid-cols-3 lg:grid-cols-4";
+  }
   return (
-    <div className="grid grid-cols-3 gap-4 p-4">
-      {localStream && <StreamOutput stream={localStream} isLocal />}
-      {remoteProducers.length > 0 && deviceRef.current && 
-        remoteProducers.map(({ producerId, socketId }) => (
-          <RemoteStream
-            key={`${producerId}-${socketId}`}
-            socket={socket}
-            device={deviceRef.current!}
-            producerId={producerId}
-          />
-        ))
-      }
+    <div className="max-w-5xl mx-auto p-6 bg-white min-h-screen">
+      <div className={`grid gap-6 ${getGridCols(remoteProducers.length + 1)}`}>
+        {localStream && <StreamOutput stream={localStream} isLocal />}
+        {remoteProducers.length > 0 &&
+          deviceRef.current &&
+          remoteProducers.map(({ producerId, socketId }) => (
+            <RemoteStream
+              key={`${producerId}-${socketId}`}
+              socket={socket}
+              device={deviceRef.current!}
+              producerId={producerId}
+            />
+          ))}
+      </div>
     </div>
   );
 };
