@@ -26,23 +26,23 @@ app.get("/", (req, res) => {
   res.send("Hello from mediasoup app!");
 });
 
-let worker: any;
-let router: any;
+let worker: mediasoup.types.Worker;
+let router: mediasoup.types.Router;
 
 // Store transports and producers per socket
 const transports = new Map(); // socketId -> { producerTransport, consumerTransport }
 const producers = new Map(); // socketId -> [{ id, kind }]
 const consumers = new Map(); // socketId -> [{ id, producerId }]
 
-const mediaCodecs = [
+const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
   {
-    kind: "audio",
+    kind: "audio" as mediasoup.types.MediaKind,
     mimeType: "audio/opus",
     clockRate: 48000,
     channels: 2,
   },
   {
-    kind: "video",
+    kind: "video" as mediasoup.types.MediaKind,
     mimeType: "video/VP8",
     clockRate: 90000,
     parameters: {
@@ -355,7 +355,7 @@ const createWebRtcTransport = async (callback: any) => {
       }
     });
 
-    transport.on("close", () => {
+    transport.on("@close", () => {
       console.log("transport closed");
     });
 

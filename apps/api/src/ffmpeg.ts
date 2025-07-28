@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
+import * as mediasoup from "mediasoup";
 
 interface StreamingSession {
   transport: any;
@@ -38,7 +39,7 @@ function cleanupHLSFiles(hlsDir: string) {
   }
 }
 
-async function createPlainTransport(router) {
+async function createPlainTransport(router: mediasoup.types.Router) {
   const transport = await router.createPlainTransport({
     listenIp: "127.0.0.1",
     rtcpMux: true,
@@ -98,7 +99,7 @@ async function cleanupSession(session: StreamingSession) {
   }
 }
 
-export async function startFFmpeg(router, producers) {
+export async function startFFmpeg(router: mediasoup.types.Router, producers) {
   try {
     console.log("Starting FFmpeg...");
 
