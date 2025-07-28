@@ -9,6 +9,7 @@ interface StreamingSession {
   ffmpegProcess: any;
 }
 
+const hlsDir = path.join(__dirname, "..", "public", "hls");
 let currentSession: StreamingSession | null = null;
 
 function cleanupHLSFiles(hlsDir: string): void {
@@ -22,7 +23,6 @@ function cleanupHLSFiles(hlsDir: string): void {
     files.forEach(file => {
       const filePath = path.join(hlsDir, file);
       
-      // Remove .ts segments, .m3u8 playlists, and .sdp files
       if (file.endsWith('.ts') || file.endsWith('.m3u8') || file.endsWith('.sdp')) {
         try {
           fs.unlinkSync(filePath);
@@ -48,9 +48,7 @@ async function createPlainTransport(router: mediasoup.types.Router): Promise<any
   return transport;
 }
 
-// Generate SDP based on actual RTP parameters
 function generateSDP(rtpParameters: any, port: number): string {
-  // Look for VP8 or H.264 codec
   const videoCodec = rtpParameters.codecs.find(
     codec => codec.mimeType.toLowerCase() === 'video/vp8' || 
              codec.mimeType.toLowerCase() === 'video/h264'
@@ -62,7 +60,7 @@ function generateSDP(rtpParameters: any, port: number): string {
 
   const payloadType = videoCodec.payloadType;
   const clockRate = videoCodec.clockRate;
-  const codecName = videoCodec.mimeType.split('/')[1].toUpperCase(); // VP8 or H264
+  const codecName = videoCodec.mimeType.split('/')[1].toUpperCase();
   
   console.log('Using codec:', codecName, 'payload type:', payloadType, 'clock rate:', clockRate);
 
@@ -76,7 +74,6 @@ function generateSDP(rtpParameters: any, port: number): string {
     `a=rtpmap:${payloadType} ${codecName}/${clockRate}`,
   ];
 
-  // Add fmtp line if there are parameters
   if (videoCodec.parameters && Object.keys(videoCodec.parameters).length > 0) {
     const fmtpParams = Object.entries(videoCodec.parameters)
       .map(([key, value]) => `${key}=${value}`)
@@ -90,6 +87,8 @@ function generateSDP(rtpParameters: any, port: number): string {
 async function cleanupSession(session: StreamingSession): Promise<void> {
   if (session.ffmpegProcess && !session.ffmpegProcess.killed) {
     session.ffmpegProcess.kill("SIGTERM");
+    // Wait a bit for graceful shutdown
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
   if (session.consumer && !session.consumer.closed) {
     session.consumer.close();
@@ -97,23 +96,24 @@ async function cleanupSession(session: StreamingSession): Promise<void> {
   if (session.transport && !session.transport.closed) {
     session.transport.close();
   }
+
+  cleanupHLSFiles(hlsDir);
 }
 
 export async function startFFmpeg(router: mediasoup.types.Router, producers: Map<string, any[]>): Promise<void> {
   try {
-    console.log("Starting FFmpeg...");
+    console.log("Starting FFmpeg streaming...");
 
     if (currentSession) {
+      console.log("Cleaning up existing session...");
       await cleanupSession(currentSession);
+      currentSession = null;
     }
 
-    const hlsDir = path.join(__dirname, "..", "public", "hls");
-    cleanupHLSFiles(hlsDir)
     if (!fs.existsSync(hlsDir)) {
       fs.mkdirSync(hlsDir, { recursive: true });
     }
 
-    // Get the first video producer
     let videoProducer: any = null;
     for (const producerList of producers.values()) {
       videoProducer = producerList.find((p: any) => p.kind === "video");
@@ -126,13 +126,9 @@ export async function startFFmpeg(router: mediasoup.types.Router, producers: Map
 
     console.log('Found video producer:', videoProducer.id);
 
-    // Create plain transport
     const plainTransport = await createPlainTransport(router);
-
-    // Define fixed FFmpeg port
     const ffmpegRtpPort = 5004;
 
-    // Connect transport to FFmpeg
     await plainTransport.connect({
       ip: "127.0.0.1",
       port: ffmpegRtpPort,
@@ -140,56 +136,53 @@ export async function startFFmpeg(router: mediasoup.types.Router, producers: Map
 
     console.log("Transport connected to FFmpeg on port", ffmpegRtpPort);
 
-    // Create consumer
     const consumer = await plainTransport.consume({
       producerId: videoProducer.id,
       rtpCapabilities: router.rtpCapabilities,
-      paused: true,
+      paused: false, // Start immediately, don't wait for resume
     });
 
-    // Get actual RTP parameters
     const rtpParameters = consumer.rtpParameters;
-    console.log('RTP Parameters:', JSON.stringify(rtpParameters, null, 2));
-
-    // Generate proper SDP file
+    console.log('RTP Parameters configured');
+    
     const sdpPath = path.join(hlsDir, "video.sdp");
     const sdpContent = generateSDP(rtpParameters, ffmpegRtpPort);
     
-    console.log('Generated SDP:');
-    console.log(sdpContent);
-    
+    console.log('Generated SDP content');
     fs.writeFileSync(sdpPath, sdpContent);
 
-    // Resume consumer to start sending RTP
-    await consumer.resume();
-    console.log("Consumer resumed, RTP should be flowing...");
+    console.log("Consumer started, RTP should be flowing...");
 
-    // Wait a moment for RTP to start
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Shorter wait time since we're not paused
+    await new Promise(resolve => setTimeout(resolve, 500));
 
-    // Start FFmpeg with VP8 to H.264 transcoding
+    // Optimized FFmpeg args for lower latency
     const ffmpegArgs = [
       "-protocol_whitelist", "file,udp,rtp",
       "-f", "sdp",
       "-i", sdpPath,
-      "-c:v", "libx264", // Transcode VP8 to H.264 for HLS
-      "-preset", "ultrafast",
-      "-tune", "zerolatency",
-      "-profile:v", "baseline", // Better compatibility
+      "-c:v", "libx264",
+      "-preset", "ultrafast", // Fastest encoding
+      "-tune", "zerolatency", // Optimize for low latency
+      "-profile:v", "baseline",
       "-level", "3.1",
-      "-pix_fmt", "yuv420p", // Ensure compatible pixel format
-      "-g", "30", // GOP size
+      "-pix_fmt", "yuv420p",
+      "-g", "15", // Smaller GOP for faster startup
+      "-keyint_min", "15", // Force keyframes more frequently
+      "-sc_threshold", "0", // Disable scene change detection
       "-an", // No audio
       "-f", "hls",
-      "-hls_time", "2",
-      "-hls_list_size", "10",
+      "-hls_time", "1", // Shorter segments for faster startup
+      "-hls_list_size", "6", // Keep fewer segments
       "-hls_flags", "delete_segments+independent_segments",
       "-hls_start_number_source", "datetime",
+      "-hls_allow_cache", "0", // Disable caching
+      "-start_number", "0",
       "-y",
       path.join(hlsDir, "stream.m3u8"),
     ];
 
-    console.log('Starting FFmpeg with command:', 'ffmpeg', ffmpegArgs.join(' '));
+    console.log('Starting FFmpeg with optimized settings...');
 
     const ffmpegProcess = spawn("ffmpeg", ffmpegArgs);
 
@@ -199,17 +192,32 @@ export async function startFFmpeg(router: mediasoup.types.Router, producers: Map
       ffmpegProcess,
     };
 
+    let ffmpegStarted = false;
+
     ffmpegProcess.stderr.on("data", (data: Buffer) => {
       const output = data.toString();
-      // Only log important messages to reduce noise
-      if (output.includes('error') || output.includes('Error') || 
-          output.includes('frame=') || output.includes('time=')) {
-        console.log(`FFmpeg: ${output.trim()}`);
+      
+      // Log important messages and detect when streaming actually starts
+      if (output.includes('Opening \'') && output.includes('stream.m3u8')) {
+        console.log('FFmpeg: HLS output opened');
+        ffmpegStarted = true;
+      } else if (output.includes('frame=') && !ffmpegStarted) {
+        console.log('FFmpeg: First frame processed');
+        ffmpegStarted = true;
+      } else if (output.includes('error') || output.includes('Error')) {
+        console.error(`FFmpeg Error: ${output.trim()}`);
       }
+    });
+
+    ffmpegProcess.stdout.on("data", (data: Buffer) => {
+      console.log(`FFmpeg stdout: ${data.toString().trim()}`);
     });
 
     ffmpegProcess.on("error", (error: Error) => {
       console.error("FFmpeg process error:", error);
+      if (currentSession) {
+        currentSession = null;
+      }
     });
 
     ffmpegProcess.on("exit", (code: number) => {
@@ -220,7 +228,17 @@ export async function startFFmpeg(router: mediasoup.types.Router, producers: Map
       }
     });
 
-    console.log("Streaming started successfully");
+    // Monitor for successful startup
+    setTimeout(() => {
+      const m3u8Path = path.join(hlsDir, "stream.m3u8");
+      if (fs.existsSync(m3u8Path)) {
+        console.log("✅ HLS stream is ready!");
+      } else {
+        console.warn("⚠️  HLS stream not ready yet after 5 seconds");
+      }
+    }, 5000);
+
+    console.log("FFmpeg streaming initialization completed");
   } catch (error) {
     console.error("Failed to start streaming:", error);
     if (currentSession) {
@@ -233,6 +251,7 @@ export async function startFFmpeg(router: mediasoup.types.Router, producers: Map
 
 export async function stopFFmpeg(): Promise<void> {
   if (currentSession) {
+    console.log("Stopping FFmpeg streaming...");
     await cleanupSession(currentSession);
     currentSession = null;
     console.log("Streaming stopped");

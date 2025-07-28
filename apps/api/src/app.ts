@@ -5,7 +5,7 @@ import * as mediasoup from "mediasoup";
 import path from "path";
 import cors from "cors"
 
-import { startFFmpeg  } from './ffmpeg'
+import { startFFmpeg, stopFFmpeg } from './ffmpeg'
 
 const PORT = 3001;
 const app = express();
@@ -19,6 +19,7 @@ const io = new Server(server, {
 });
 
 app.use(cors())
+app.use(express.json());
 
 app.use("/hls", express.static(path.join(__dirname, '..', "public", "hls")));
 
@@ -34,9 +35,9 @@ type TransportMap = Map<string, { producerTransport?: any; consumerTransport?: a
 type ProducerMap = Map<string, any[]>;
 type ConsumerMap = Map<string, any[]>;
 
-const transports: TransportMap = new Map(); // socketId -> { producerTransport, consumerTransport }
-const producers: ProducerMap = new Map(); // socketId -> [{ id, kind }]
-const consumers: ConsumerMap = new Map(); // socketId -> [{ id, producerId }]
+const transports: TransportMap = new Map();
+const producers: ProducerMap = new Map();
+const consumers: ConsumerMap = new Map();
 
 const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
   {
@@ -73,12 +74,10 @@ const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
 io.on("connection", async (socket) => {
   console.log(`New WebSocket connection: ${socket.id}`);
 
-  // Initialize storage for this socket
   transports.set(socket.id, {});
   producers.set(socket.id, []);
   consumers.set(socket.id, []);
 
-  // Send existing producers to new client
   const existingProducers: any[] = [];
   producers.forEach((producerList, socketId) => {
     if (socketId !== socket.id) {
@@ -98,7 +97,6 @@ io.on("connection", async (socket) => {
   socket.on("disconnect", () => {
     console.log(`Disconnect: ${socket.id}`);
 
-    // Clean up transports
     const socketTransports = transports.get(socket.id);
     if (socketTransports) {
       if (socketTransports.producerTransport) {
@@ -109,7 +107,6 @@ io.on("connection", async (socket) => {
       }
     }
 
-    // Clean up producers
     const socketProducers = producers.get(socket.id);
     if (socketProducers) {
       socketProducers.forEach((producer: any) => {
@@ -117,7 +114,6 @@ io.on("connection", async (socket) => {
       });
     }
 
-    // Clean up consumers
     const socketConsumers = consumers.get(socket.id);
     if (socketConsumers) {
       socketConsumers.forEach((consumer: any) => {
@@ -125,12 +121,24 @@ io.on("connection", async (socket) => {
       });
     }
 
-    // Remove from maps
     transports.delete(socket.id);
     producers.delete(socket.id);
     consumers.delete(socket.id);
 
-    // Notify other clients about producer removal
+    // Check if we should stop streaming
+    let hasAnyProducers = false;
+    for (const producerList of producers.values()) {
+      if (producerList.length > 0) {
+        hasAnyProducers = true;
+        break;
+      }
+    }
+
+    if (!hasAnyProducers) {
+      console.log("No producers left, stopping streaming");
+      stopFFmpeg();
+    }
+
     socket.broadcast.emit("producerClosed", { socketId: socket.id });
   });
 
@@ -177,7 +185,7 @@ io.on("connection", async (socket) => {
   socket.on(
     "transportProduce",
     async ({ kind, rtpParameters, appData }, callback) => {
-      console.log("transportProduce for socket:", socket.id);
+      console.log("transportProduce for socket:", socket.id, "kind:", kind);
       try {
         const socketTransports = transports.get(socket.id);
         if (!socketTransports || !socketTransports.producerTransport) {
@@ -195,7 +203,6 @@ io.on("connection", async (socket) => {
           console.log("transport for this producer closed");
           producer.close();
 
-          // Remove from producers map
           const socketProducers = producers.get(socket.id) || [];
           const filteredProducers = socketProducers.filter(
             (p: any) => p.id !== producer.id
@@ -203,14 +210,12 @@ io.on("connection", async (socket) => {
           producers.set(socket.id, filteredProducers);
         });
 
-        // Add to producers map
         const socketProducers = producers.get(socket.id) || [];
         socketProducers.push(producer);
         producers.set(socket.id, socketProducers);
 
         startFFmpeg(router, producers);
 
-        // Notify other clients about new producer
         socket.broadcast.emit("newProducer", {
           producerId: producer.id,
           socketId: socket.id,
@@ -248,7 +253,6 @@ io.on("connection", async (socket) => {
       socket.id
     );
     try {
-      // Find the producer
       let targetProducer: any = null;
       for (const [socketId, producerList] of producers.entries()) {
         const producer = producerList.find((p: any) => p.id === producerId);
@@ -285,7 +289,6 @@ io.on("connection", async (socket) => {
 
         consumer.on("producerclose", () => {
           console.log("producer of consumer closed");
-          // Remove from consumers map
           const socketConsumers = consumers.get(socket.id) || [];
           const filteredConsumers = socketConsumers.filter(
             (c: any) => c.id !== consumer.id
@@ -293,7 +296,6 @@ io.on("connection", async (socket) => {
           consumers.set(socket.id, filteredConsumers);
         });
 
-        // Add to consumers map
         const socketConsumers = consumers.get(socket.id) || [];
         socketConsumers.push(consumer);
         consumers.set(socket.id, socketConsumers);
