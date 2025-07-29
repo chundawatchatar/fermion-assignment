@@ -4,30 +4,58 @@ import React, { useEffect, useRef, useState } from "react";
 import * as mediasoupClient from "mediasoup-client";
 import StreamOutput from "./StreamOutput";
 
-type Props = {
-  socket: any;
-  device: mediasoupClient.types.Device;
-  producerId: string;
+type Producer = {
+  id: string;
+  kind: "audio" | "video";
 };
 
-const RemoteStream: React.FC<Props> = ({ socket, device, producerId }) => {
+type Props = {
+  socket: any; // consider typing this with `Socket<ServerToClientEvents, ClientToServerEvents>`
+  device: mediasoupClient.types.Device;
+  producers: Producer[];
+};
+
+const RemoteStream: React.FC<Props> = ({ socket, device, producers }) => {
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const consumerRef = useRef<mediasoupClient.types.Consumer | null>(null);
+  const consumerRefs = useRef<mediasoupClient.types.Consumer[]>([]);
 
   useEffect(() => {
-    const consumeRemoteStream = async () => {
+    if (!producers || producers.length < 2) {
+      setError("Waiting for both audio and video producers...");
+      setIsLoading(false);
+      return;
+    }
+
+    let consumerTransport: mediasoupClient.types.Transport | null = null;
+
+    const setupRemoteStream = async () => {
       try {
         setIsLoading(true);
         setError(null);
-        
-        const transport = await createRecvTransport();
-        const consumer = await connectRecvTransport(transport);
-        consumerRef.current = consumer;
-        
-        const stream = new MediaStream([consumer.track]);
-        setMediaStream(stream);
+
+        consumerTransport = await createRecvTransport();
+
+        const [videoProducer, audioProducer] = producers;
+
+        const videoConsumer = await connectRecvTransport(
+          consumerTransport,
+          videoProducer.id
+        );
+        const audioConsumer = await connectRecvTransport(
+          consumerTransport,
+          audioProducer.id
+        );
+
+        consumerRefs.current = [videoConsumer, audioConsumer];
+
+        const remoteStream = new MediaStream([
+          videoConsumer.track,
+          audioConsumer.track,
+        ]);
+
+        setMediaStream(remoteStream);
         setIsLoading(false);
       } catch (err: any) {
         console.error("Error setting up remote stream:", err);
@@ -36,18 +64,16 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producerId }) => {
       }
     };
 
-    consumeRemoteStream();
+    setupRemoteStream();
 
-    // Cleanup on unmount
     return () => {
-      if (consumerRef.current) {
-        consumerRef.current.close();
-      }
+      consumerRefs.current.forEach((c) => c?.close());
+      if (consumerTransport) consumerTransport.close();
       if (mediaStream) {
-        mediaStream.getTracks().forEach(track => track.stop());
+        mediaStream.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [producerId]);
+  }, [producers]);
 
   const createRecvTransport = (): Promise<mediasoupClient.types.Transport> => {
     return new Promise((resolve, reject) => {
@@ -56,75 +82,65 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producerId }) => {
         { sender: false },
         ({ params: serverParams }: any) => {
           if (serverParams.error) {
-            console.error("Error creating recv transport:", serverParams.error);
-            reject(new Error(serverParams.error));
-            return;
+            return reject(new Error(serverParams.error));
           }
 
-          console.log("Recv transport params:", serverParams);
-          const consumerTransport = device.createRecvTransport(serverParams);
+          const recvTransport = device.createRecvTransport(serverParams);
 
-          consumerTransport.on(
+          recvTransport.on(
             "connect",
             async ({ dtlsParameters }, callback, errback) => {
               try {
                 socket.emit("transportRecvConnect", { dtlsParameters });
                 callback();
-              } catch (error: any) {
-                console.error("Error in recv transport connect:", error);
-                errback(error);
+              } catch (err: any) {
+                errback(err);
               }
             }
           );
 
-          consumerTransport.on("connectionstatechange", (state) => {
-            console.log("Consumer transport connection state:", state);
+          recvTransport.on("connectionstatechange", (state) => {
+            console.log("Recv transport state:", state);
           });
 
-          resolve(consumerTransport);
+          resolve(recvTransport);
         }
       );
     });
   };
 
   const connectRecvTransport = async (
-    consumerTransport: mediasoupClient.types.Transport
+    transport: mediasoupClient.types.Transport,
+    producerId: string
   ): Promise<mediasoupClient.types.Consumer> => {
     return new Promise((resolve, reject) => {
       socket.emit(
         "consume",
         {
           rtpCapabilities: device.rtpCapabilities,
-          producerId: producerId,
+          producerId,
         },
-        async ({ params: consumeParams }: any) => {
-          if (consumeParams.error) {
-            console.error("Error in consume:", consumeParams.error);
-            reject(new Error(consumeParams.error));
-            return;
+        async ({ params }: any) => {
+          if (params?.error) {
+            return reject(new Error(params.error));
           }
 
-          console.log("Consume params:", consumeParams);
-          console.log({ producerId })
-          
           try {
-            const consumer = await consumerTransport.consume({
-              id: consumeParams.id,
-              producerId: producerId,
-              kind: consumeParams.kind,
-              rtpParameters: consumeParams.rtpParameters,
+            const consumer = await transport.consume({
+              id: params.id,
+              producerId,
+              kind: params.kind,
+              rtpParameters: params.rtpParameters,
             });
 
-            consumer.on("transportclose", () => {
-              console.log("Consumer transport closed");
-            });
+            consumer.on("transportclose", () =>
+              console.log("Consumer transport closed")
+            );
 
-            // Resume the consumer
             socket.emit("consumerResume", { consumerId: consumer.id });
-            
+
             resolve(consumer);
           } catch (error: any) {
-            console.error("Error creating consumer:", error);
             reject(error);
           }
         }
@@ -132,10 +148,11 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producerId }) => {
     });
   };
 
+  // Render states
   if (isLoading) {
     return (
       <div className="rounded-xl overflow-hidden border p-2 w-80 h-48 flex items-center justify-center">
-        <div className="text-gray-400">Loading remote stream...</div>
+        <span className="text-gray-400">Loading remote stream...</span>
       </div>
     );
   }
@@ -143,7 +160,7 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producerId }) => {
   if (error) {
     return (
       <div className="rounded-xl overflow-hidden border p-2 w-80 h-48 flex items-center justify-center">
-        <div className="text-red-400">Error: {error}</div>
+        <span className="text-red-500">Error: {error}</span>
       </div>
     );
   }
@@ -151,7 +168,7 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producerId }) => {
   if (!mediaStream) {
     return (
       <div className="rounded-xl overflow-hidden border p-2 w-80 h-48 flex items-center justify-center">
-        <div className="text-gray-400">Waiting for remote stream...</div>
+        <span className="text-gray-400">No media stream available</span>
       </div>
     );
   }

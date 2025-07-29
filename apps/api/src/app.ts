@@ -3,9 +3,9 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import * as mediasoup from "mediasoup";
 import path from "path";
-import cors from "cors"
+import cors from "cors";
 
-import { startFFmpeg, stopFFmpeg } from './ffmpeg'
+import { startFFmpeg, stopFFmpeg } from "./ffmpeg";
 
 const PORT = 3001;
 const app = express();
@@ -18,10 +18,10 @@ const io = new Server(server, {
   path: "/ws",
 });
 
-app.use(cors())
+app.use(cors());
 app.use(express.json());
 
-app.use("/hls", express.static(path.join(__dirname, '..', "public", "hls")));
+app.use("/hls", express.static(path.join(__dirname, "..", "public", "hls")));
 
 app.get("/", (req, res) => {
   res.send("Hello from mediasoup app!");
@@ -31,8 +31,11 @@ let worker: mediasoup.types.Worker;
 let router: mediasoup.types.Router;
 
 // Store transports and producers per socket
-type TransportMap = Map<string, { producerTransport?: any; consumerTransport?: any }>;
-type ProducerMap = Map<string, any[]>;
+type TransportMap = Map<
+  string,
+  { producerTransport?: any; consumerTransport?: any }
+>;
+type ProducerMap = Map<string, string[]>;
 type ConsumerMap = Map<string, any[]>;
 
 const transports: TransportMap = new Map();
@@ -77,22 +80,6 @@ io.on("connection", async (socket) => {
   transports.set(socket.id, {});
   producers.set(socket.id, []);
   consumers.set(socket.id, []);
-
-  const existingProducers: any[] = [];
-  producers.forEach((producerList, socketId) => {
-    if (socketId !== socket.id) {
-      producerList.forEach((producer: any) => {
-        existingProducers.push({
-          producerId: producer.id,
-          socketId: socketId,
-        });
-      });
-    }
-  });
-
-  socket.emit("connectionSuccess", {
-    producers: existingProducers,
-  });
 
   socket.on("disconnect", () => {
     console.log(`Disconnect: ${socket.id}`);
@@ -177,6 +164,20 @@ io.on("connection", async (socket) => {
       if (socketTransports && socketTransports.producerTransport) {
         await socketTransports.producerTransport.connect({ dtlsParameters });
       }
+
+      const existingProducers: { socketId: string; producers: any }[] = [];
+
+      producers.forEach((producerList, socketId) => {
+        if (socketId !== socket.id && producerList.length >= 2) {
+          const minimalProducers = producerList.map((p: any) => ({
+            id: p.id,
+            kind: p.kind,
+          }));
+          existingProducers.push({ socketId, producers: minimalProducers });
+        }
+      });
+
+      socket.emit("onRoomJoined", existingProducers);
     } catch (error) {
       console.error("Error connecting producer transport:", error);
     }
@@ -216,10 +217,17 @@ io.on("connection", async (socket) => {
 
         startFFmpeg(router, producers);
 
-        socket.broadcast.emit("newProducer", {
-          producerId: producer.id,
-          socketId: socket.id,
-        });
+        if (socketProducers.length >= 2) {
+          const minimalProducers = socketProducers.map((p: any) => ({
+            id: p.id,
+            kind: p.kind,
+          }));
+
+          socket.broadcast.emit("newProducer", {
+            producers: minimalProducers,
+            socketId: socket.id,
+          });
+        }
 
         callback({
           id: producer.id,
@@ -338,7 +346,9 @@ io.on("connection", async (socket) => {
   });
 });
 
-const createWebRtcTransport = async (callback: (params: any) => void): Promise<any> => {
+const createWebRtcTransport = async (
+  callback: (params: any) => void
+): Promise<any> => {
   try {
     const webRtcTransport_options = {
       listenIps: [
