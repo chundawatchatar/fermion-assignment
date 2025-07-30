@@ -104,22 +104,26 @@ export async function startFFmpeg(router: mediasoup.types.Router, producers: Map
   try {
     console.log("Starting FFmpeg streaming...");
 
-    if (currentSession) {
-      console.log("Cleaning up existing session...");
-      await cleanupSession(currentSession);
-      currentSession = null;
-    }
+    if(currentSession) return
+
+    // if (currentSession) {
+    //   console.log("Cleaning up existing session...");
+    //   await cleanupSession(currentSession);
+    //   currentSession = null;
+    // }
 
     if (!fs.existsSync(hlsDir)) {
       fs.mkdirSync(hlsDir, { recursive: true });
     }
 
     let videoProducer: any = null;
+    // let audioProducer: any = null
     for (const producerList of producers.values()) {
       videoProducer = producerList.find((p: any) => p.kind === "video");
+      // audioProducer = producerList.find((p: any) => p.kind === "audio");
       if (videoProducer) break;
     }
-
+    
     if (!videoProducer) {
       throw new Error("No video producer found");
     }

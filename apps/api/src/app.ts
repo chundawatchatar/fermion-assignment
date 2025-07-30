@@ -44,25 +44,31 @@ const consumers: ConsumerMap = new Map();
 
 const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
   {
-    kind: "audio" as mediasoup.types.MediaKind,
+    kind: "audio",
     mimeType: "audio/opus",
     clockRate: 48000,
     channels: 2,
+    parameters: {
+      useinbandfec: 1,
+      usedtx: 1,
+    },
   },
   {
-    kind: "video" as mediasoup.types.MediaKind,
+    kind: "video",
     mimeType: "video/VP8",
     clockRate: 90000,
     parameters: {
-      "x-google-start-bitrate": 1000,
+      "x-google-start-bitrate": 1500,
+      "x-google-max-bitrate": 3000,
+      "x-google-min-bitrate": 500,
     },
   },
 ];
 
 (async () => {
   worker = await mediasoup.createWorker({
-    rtcMinPort: 2000,
-    rtcMaxPort: 2020,
+    rtcMinPort: 40000,
+    rtcMaxPort: 49999,
   });
   console.log(`worker pid ${worker.pid}`);
 

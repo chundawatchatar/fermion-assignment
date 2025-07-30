@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "hls.js": "^1.6.7",
+    "html2canvas": "^1.4.1",
     "lucide-react": "^0.533.0",
     "mediasoup-client": "^3.12.5",
     "next": "15.4.3",

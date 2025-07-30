@@ -54,20 +54,23 @@ const MediasoupClientComponent = () => {
     };
 
     const handleProducerClosed = ({ socketId }: { socketId: string }) => {
-      setRemoteProducers((prev) =>
-        prev.filter((p) => p.socketId !== socketId)
-      );
+      setRemoteProducers((prev) => prev.filter((p) => p.socketId !== socketId));
+    };
+
+    const handleDisconnect = (reason: string) => {
+      console.log(`Disconnected: ${reason}`);
+      setRemoteProducers([]);
+      setIsJoined(false);
+      socket.off("newProducer", handleNewProducer);
+      socket.off("onRoomJoined", handleRoomJoined);
+      socket.off("producerClosed", handleProducerClosed);
+      socket.off("disconnect", handleDisconnect);
     };
 
     socket.on("newProducer", handleNewProducer);
     socket.on("onRoomJoined", handleRoomJoined);
     socket.on("producerClosed", handleProducerClosed);
-
-    return () => {
-      socket.off("newProducer", handleNewProducer);
-      socket.off("onRoomJoined", handleRoomJoined);
-      socket.off("producerClosed", handleProducerClosed);
-    };
+    socket.on("disconnect", handleDisconnect);
   };
 
   const getRtpCapabilities = () => {
@@ -81,6 +84,8 @@ const MediasoupClientComponent = () => {
 
   const joinRoom = async () => {
     if (!localStream || isJoined) return;
+
+    addSocketListeners();
 
     setIsConnecting(true);
     try {
@@ -119,21 +124,21 @@ const MediasoupClientComponent = () => {
           audio: true,
         });
         setLocalStream(stream);
-        const cleanup = addSocketListeners();
-        return cleanup;
+        // const cleanup = addSocketListeners();
+        // return cleanup;
       } catch (error) {
         console.error("Error in init:", error);
       }
     };
 
-    const cleanupPromise = init();
+    init();
 
     return () => {
       socket.disconnect();
       if (localStream) {
         localStream.getTracks().forEach((track) => track.stop());
       }
-      cleanupPromise?.then((cleanup) => cleanup?.());
+      // cleanupPromise?.then((cleanup) => cleanup?.());
     };
   }, []);
 
