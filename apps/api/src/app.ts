@@ -8,6 +8,7 @@ import cors from "cors";
 import { startFFmpeg, stopFFmpeg } from "./ffmpeg";
 
 const PORT = 3001;
+const ANNOUNCED_IP = process.env.MEDIASOUP_ANNOUNCED_IP || "127.0.0.1";
 const app = express();
 const server = createServer(app);
 const io = new Server(server, {
@@ -31,21 +32,79 @@ let worker: mediasoup.types.Worker;
 let router: mediasoup.types.Router;
 
 // Store transports and producers per socket
-type TransportMap = Map<
-  string,
-  { producerTransport?: any; consumerTransport?: any }
->;
-type ProducerMap = Map<string, string[]>;
+type SocketTransports = {
+  producerTransport?: any;
+  consumerTransports: Map<string, any>;
+};
+type TransportMap = Map<string, SocketTransports>;
+type ProducerMap = Map<string, any[]>;
 type ConsumerMap = Map<string, any[]>;
 
 const transports: TransportMap = new Map();
 const producers: ProducerMap = new Map();
 const consumers: ConsumerMap = new Map();
 
+const hasVideoProducers = (): boolean => {
+  for (const producerList of producers.values()) {
+    if (
+      producerList.some(
+        (producer: any) => producer.kind === "video" && !producer.closed,
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+const refreshFFmpegMix = (): void => {
+  if (hasVideoProducers()) {
+    startFFmpeg(router, producers).catch((error) => {
+      console.error("Failed to refresh FFmpeg mix:", error);
+    });
+    return;
+  }
+
+  stopFFmpeg().catch((error) => {
+    console.error("Failed to stop FFmpeg mix:", error);
+  });
+};
+
+const closeConsumerTransport = (
+  socketId: string,
+  transportId: string,
+): void => {
+  const socketTransports = transports.get(socketId);
+  const transport = socketTransports?.consumerTransports.get(transportId);
+
+  if (!transport) {
+    return;
+  }
+
+  transport.close();
+  socketTransports?.consumerTransports.delete(transportId);
+
+  const socketConsumers = consumers.get(socketId) || [];
+  const remainingConsumers = socketConsumers.filter((consumer: any) => {
+    if (consumer.appData?.transportId === transportId) {
+      if (!consumer.closed) {
+        consumer.close();
+      }
+      return false;
+    }
+
+    return true;
+  });
+
+  consumers.set(socketId, remainingConsumers);
+};
+
 const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
   {
     kind: "audio",
     mimeType: "audio/opus",
+    preferredPayloadType: 100,
     clockRate: 48000,
     channels: 2,
     parameters: {
@@ -56,6 +115,7 @@ const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
   {
     kind: "video",
     mimeType: "video/VP8",
+    preferredPayloadType: 101,
     clockRate: 90000,
     parameters: {
       "x-google-start-bitrate": 1500,
@@ -83,7 +143,7 @@ const mediaCodecs: mediasoup.types.RtpCodecCapability[] = [
 io.on("connection", async (socket) => {
   console.log(`New WebSocket connection: ${socket.id}`);
 
-  transports.set(socket.id, {});
+  transports.set(socket.id, { consumerTransports: new Map() });
   producers.set(socket.id, []);
   consumers.set(socket.id, []);
 
@@ -95,9 +155,9 @@ io.on("connection", async (socket) => {
       if (socketTransports.producerTransport) {
         socketTransports.producerTransport.close();
       }
-      if (socketTransports.consumerTransport) {
-        socketTransports.consumerTransport.close();
-      }
+      socketTransports.consumerTransports.forEach((transport) => {
+        transport.close();
+      });
     }
 
     const socketProducers = producers.get(socket.id);
@@ -118,19 +178,7 @@ io.on("connection", async (socket) => {
     producers.delete(socket.id);
     consumers.delete(socket.id);
 
-    // Check if we should stop streaming
-    let hasAnyProducers = false;
-    for (const producerList of producers.values()) {
-      if (producerList.length > 0) {
-        hasAnyProducers = true;
-        break;
-      }
-    }
-
-    if (!hasAnyProducers) {
-      console.log("No producers left, stopping streaming");
-      stopFFmpeg();
-    }
+    refreshFFmpegMix();
 
     socket.broadcast.emit("producerClosed", { socketId: socket.id });
   });
@@ -144,12 +192,17 @@ io.on("connection", async (socket) => {
     console.log(`Is this a sender request? ${sender} for socket ${socket.id}`);
     try {
       const transport = await createWebRtcTransport(callback);
-      const socketTransports = transports.get(socket.id) || {};
+      const socketTransports: SocketTransports = transports.get(socket.id) || {
+        consumerTransports: new Map(),
+      };
 
       if (sender) {
         socketTransports.producerTransport = transport;
       } else {
-        socketTransports.consumerTransport = transport;
+        socketTransports.consumerTransports.set(transport.id, transport);
+        transport.on("@close", () => {
+          socketTransports.consumerTransports.delete(transport.id);
+        });
       }
 
       transports.set(socket.id, socketTransports);
@@ -212,16 +265,22 @@ io.on("connection", async (socket) => {
 
           const socketProducers = producers.get(socket.id) || [];
           const filteredProducers = socketProducers.filter(
-            (p: any) => p.id !== producer.id
+            (p: any) => p.id !== producer.id,
           );
           producers.set(socket.id, filteredProducers);
+
+          if (producer.kind === "video") {
+            refreshFFmpegMix();
+          }
         });
 
         const socketProducers = producers.get(socket.id) || [];
         socketProducers.push(producer);
         producers.set(socket.id, socketProducers);
 
-        startFFmpeg(router, producers);
+        if (producer.kind === "video") {
+          refreshFFmpegMix();
+        }
 
         if (socketProducers.length >= 2) {
           const minimalProducers = socketProducers.map((p: any) => ({
@@ -244,96 +303,115 @@ io.on("connection", async (socket) => {
           error: error.message,
         });
       }
-    }
+    },
   );
 
-  socket.on("transportRecvConnect", async ({ dtlsParameters }) => {
-    console.log("transportRecvConnect for socket:", socket.id);
+  socket.on("transportRecvConnect", async ({ transportId, dtlsParameters }) => {
+    console.log(
+      "transportRecvConnect for socket:",
+      socket.id,
+      "transport:",
+      transportId,
+    );
     try {
       const socketTransports = transports.get(socket.id);
-      if (socketTransports && socketTransports.consumerTransport) {
-        await socketTransports.consumerTransport.connect({ dtlsParameters });
+      const consumerTransport =
+        socketTransports?.consumerTransports.get(transportId);
+
+      if (!consumerTransport) {
+        throw new Error("Consumer transport not found");
       }
+
+      await consumerTransport.connect({ dtlsParameters });
     } catch (error) {
       console.error("Error connecting consumer transport:", error);
     }
   });
 
-  socket.on("consume", async ({ rtpCapabilities, producerId }, callback) => {
-    console.log(
-      "consume request for producerId:",
-      producerId,
-      "from socket:",
-      socket.id
-    );
-    try {
-      let targetProducer: any = null;
-      for (const [socketId, producerList] of producers.entries()) {
-        const producer = producerList.find((p: any) => p.id === producerId);
-        if (producer) {
-          targetProducer = producer;
-          break;
-        }
-      }
-
-      if (!targetProducer) {
-        throw new Error("Producer not found");
-      }
-
-      if (
-        router.canConsume({
-          producerId: targetProducer.id,
-          rtpCapabilities,
-        })
-      ) {
-        const socketTransports = transports.get(socket.id);
-        if (!socketTransports || !socketTransports.consumerTransport) {
-          throw new Error("Consumer transport not found");
+  socket.on(
+    "consume",
+    async ({ rtpCapabilities, producerId, transportId }, callback) => {
+      console.log(
+        "consume request for producerId:",
+        producerId,
+        "from socket:",
+        socket.id,
+      );
+      try {
+        let targetProducer: any = null;
+        for (const [socketId, producerList] of producers.entries()) {
+          const producer = producerList.find((p: any) => p.id === producerId);
+          if (producer) {
+            targetProducer = producer;
+            break;
+          }
         }
 
-        const consumer = await socketTransports.consumerTransport.consume({
-          producerId: targetProducer.id,
-          rtpCapabilities,
-          paused: true,
-        });
+        if (!targetProducer) {
+          throw new Error("Producer not found");
+        }
 
-        consumer.on("transportclose", () => {
-          console.log("transport close from consumer");
-        });
+        if (
+          router.canConsume({
+            producerId: targetProducer.id,
+            rtpCapabilities,
+          })
+        ) {
+          const socketTransports = transports.get(socket.id);
+          const consumerTransport =
+            socketTransports?.consumerTransports.get(transportId);
 
-        consumer.on("producerclose", () => {
-          console.log("producer of consumer closed");
+          if (!consumerTransport) {
+            throw new Error("Consumer transport not found");
+          }
+
+          const consumer = await consumerTransport.consume({
+            producerId: targetProducer.id,
+            rtpCapabilities,
+            paused: true,
+            appData: {
+              transportId,
+            },
+          });
+
+          consumer.on("transportclose", () => {
+            console.log("transport close from consumer");
+          });
+
+          consumer.on("producerclose", () => {
+            console.log("producer of consumer closed");
+            const socketConsumers = consumers.get(socket.id) || [];
+            const filteredConsumers = socketConsumers.filter(
+              (c: any) => c.id !== consumer.id,
+            );
+            consumers.set(socket.id, filteredConsumers);
+          });
+
           const socketConsumers = consumers.get(socket.id) || [];
-          const filteredConsumers = socketConsumers.filter(
-            (c: any) => c.id !== consumer.id
-          );
-          consumers.set(socket.id, filteredConsumers);
+          socketConsumers.push(consumer);
+          consumers.set(socket.id, socketConsumers);
+
+          const params = {
+            id: consumer.id,
+            producerId: targetProducer.id,
+            kind: consumer.kind,
+            rtpParameters: consumer.rtpParameters,
+          };
+
+          callback({ params });
+        } else {
+          throw new Error("Cannot consume");
+        }
+      } catch (error: any) {
+        console.error("Error in consume:", error);
+        callback({
+          params: {
+            error: error.message,
+          },
         });
-
-        const socketConsumers = consumers.get(socket.id) || [];
-        socketConsumers.push(consumer);
-        consumers.set(socket.id, socketConsumers);
-
-        const params = {
-          id: consumer.id,
-          producerId: targetProducer.id,
-          kind: consumer.kind,
-          rtpParameters: consumer.rtpParameters,
-        };
-
-        callback({ params });
-      } else {
-        throw new Error("Cannot consume");
       }
-    } catch (error: any) {
-      console.error("Error in consume:", error);
-      callback({
-        params: {
-          error: error.message,
-        },
-      });
-    }
-  });
+    },
+  );
 
   socket.on("consumerResume", async ({ consumerId }) => {
     console.log("consumer resume for consumer:", consumerId);
@@ -350,17 +428,21 @@ io.on("connection", async (socket) => {
       console.error("Error resuming consumer:", error);
     }
   });
+
+  socket.on("closeConsumerTransport", ({ transportId }) => {
+    closeConsumerTransport(socket.id, transportId);
+  });
 });
 
 const createWebRtcTransport = async (
-  callback: (params: any) => void
+  callback: (params: any) => void,
 ): Promise<any> => {
   try {
     const webRtcTransport_options = {
       listenIps: [
         {
           ip: "0.0.0.0",
-          announcedIp: "127.0.0.1",
+          announcedIp: ANNOUNCED_IP,
         },
       ],
       enableUdp: true,

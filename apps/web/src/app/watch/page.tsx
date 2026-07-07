@@ -14,7 +14,7 @@ export default function WatchPage() {
       const response = await fetch("http://localhost:3001/hls/stream.m3u8", {
         method: "HEAD",
       });
-      
+
       if (response.ok) {
         return true;
       }
@@ -38,6 +38,11 @@ export default function WatchPage() {
     if (!Hls.isSupported() || !videoRef.current) {
       setError("HLS is not supported in this browser");
       return;
+    }
+
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
     }
 
     const hls = new Hls({
@@ -64,23 +69,27 @@ export default function WatchPage() {
 
     hls.on(Hls.Events.ERROR, (event, data) => {
       if (data.fatal) {
-        setError("Stream playback error");
-        setStreamStatus("not_started");
+        hls.destroy();
+        hlsRef.current = null;
+        setError("Stream changed. Reconnecting...");
+        setStreamStatus("checking");
+        startPolling();
       }
     });
   };
 
   const pollForStream = async () => {
     const isAvailable = await checkStreamAvailability();
-    
+
     if (isAvailable) {
+      setError("");
       setStreamStatus("starting");
       // Clear polling interval
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
         pollIntervalRef.current = null;
       }
-      
+
       // Small delay to ensure stream is ready
       setTimeout(() => {
         initializeHLS();
@@ -90,19 +99,24 @@ export default function WatchPage() {
     }
   };
 
+  const startPolling = () => {
+    pollForStream();
+
+    if (!pollIntervalRef.current) {
+      pollIntervalRef.current = setInterval(() => {
+        pollForStream();
+      }, 2000);
+    }
+  };
+
   useEffect(() => {
     const initialize = async () => {
       setStreamStatus("checking");
-      
+
       // Try to start the stream
       // await startStream();
-      
-      // Start polling for stream availability
-      pollForStream(); // Check immediately
-      
-      pollIntervalRef.current = setInterval(() => {
-        pollForStream();
-      }, 2000); // Check every 2 seconds
+
+      startPolling();
     };
 
     initialize();
@@ -143,7 +157,7 @@ export default function WatchPage() {
             {error && <p className="text-red-400 mt-2">{error}</p>}
           </div>
         )}
-        
+
         <video
           ref={videoRef}
           controls

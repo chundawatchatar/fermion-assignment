@@ -1,5 +1,4 @@
-'use client'
-
+"use client";
 
 import React, { useEffect, useRef } from "react";
 
@@ -13,7 +12,15 @@ const StreamOutput: React.FC<Props> = ({ stream, isLocal = false }) => {
 
   useEffect(() => {
     if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
+      const video = videoRef.current;
+      video.srcObject = stream;
+
+      video.play().catch(() => {
+        video.muted = true;
+        video.play().catch(() => {
+          // Browser still requires manual playback.
+        });
+      });
     }
   }, [stream]);
 
@@ -24,6 +31,7 @@ const StreamOutput: React.FC<Props> = ({ stream, isLocal = false }) => {
         autoPlay
         playsInline
         muted={isLocal}
+        controls={!isLocal}
         className="w-full aspect-video bg-black rounded-lg"
       />
       <div className="mt-2 text-xs text-gray-700 font-mono">

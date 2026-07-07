@@ -8,6 +8,7 @@
   "scripts": {
     "lint": "eslint . --max-warnings 0",
     "generate:component": "turbo gen react-component",
+    "typecheck": "tsc --noEmit",
     "check-types": "tsc --noEmit"
   },
   "devDependencies": {

@@ -6,7 +6,8 @@
     "dev": "turbo run dev",
     "lint": "turbo run lint",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
-    "check-types": "turbo run check-types"
+    "typecheck": "./node_modules/.bin/tsc -p apps/api/tsconfig.json --noEmit && cd apps/web && ./node_modules/.bin/next build && cd ../.. && ./node_modules/.bin/tsc -p packages/ui/tsconfig.json --noEmit",
+    "check-types": "pnpm typecheck"
   },
   "devDependencies": {
     "prettier": "^3.6.2",
@@ -15,6 +16,6 @@
   },
   "packageManager": "pnpm@9.0.0",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

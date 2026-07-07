@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as mediasoupClient from "mediasoup-client";
 import RemoteStream from "@/components/RemoteStream";
-import io from "socket.io-client";
+import { io, Socket } from "socket.io-client";
 
 // Define RemoteProducer type
 type RemoteProducer = {
@@ -12,12 +12,14 @@ type RemoteProducer = {
 };
 
 const CaptureComponent = () => {
-  const socket = useRef(
-    io("http://localhost:3001", {
+  const socketRef = useRef<Socket | null>(null);
+  if (!socketRef.current) {
+    socketRef.current = io("http://localhost:3001", {
       path: "/ws",
       transports: ["websocket"],
-    })
-  ).current;
+    });
+  }
+  const socket = socketRef.current;
 
   const deviceRef = useRef<mediasoupClient.Device | null>(null);
   const [remoteProducers, setRemoteProducers] = useState<RemoteProducer[]>([]);

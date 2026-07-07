@@ -15,6 +15,11 @@ type Props = {
   producers: Producer[];
 };
 
+const iceServers: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+];
+
 const RemoteStream: React.FC<Props> = ({ socket, device, producers }) => {
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -37,15 +42,24 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producers }) => {
 
         consumerTransport = await createRecvTransport();
 
-        const [videoProducer, audioProducer] = producers;
+        const videoProducer = producers.find(
+          (producer) => producer.kind === "video",
+        );
+        const audioProducer = producers.find(
+          (producer) => producer.kind === "audio",
+        );
+
+        if (!videoProducer || !audioProducer) {
+          throw new Error("Remote stream is missing audio or video");
+        }
 
         const videoConsumer = await connectRecvTransport(
           consumerTransport,
-          videoProducer.id
+          videoProducer.id,
         );
         const audioConsumer = await connectRecvTransport(
           consumerTransport,
-          audioProducer.id
+          audioProducer.id,
         );
 
         consumerRefs.current = [videoConsumer, audioConsumer];
@@ -68,7 +82,12 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producers }) => {
 
     return () => {
       consumerRefs.current.forEach((c) => c?.close());
-      if (consumerTransport) consumerTransport.close();
+      if (consumerTransport) {
+        socket.emit("closeConsumerTransport", {
+          transportId: consumerTransport.id,
+        });
+        consumerTransport.close();
+      }
       if (mediaStream) {
         mediaStream.getTracks().forEach((track) => track.stop());
       }
@@ -85,18 +104,24 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producers }) => {
             return reject(new Error(serverParams.error));
           }
 
-          const recvTransport = device.createRecvTransport(serverParams);
+          const recvTransport = device.createRecvTransport({
+            ...serverParams,
+            iceServers,
+          });
 
           recvTransport.on(
             "connect",
             async ({ dtlsParameters }, callback, errback) => {
               try {
-                socket.emit("transportRecvConnect", { dtlsParameters });
+                socket.emit("transportRecvConnect", {
+                  transportId: recvTransport.id,
+                  dtlsParameters,
+                });
                 callback();
               } catch (err: any) {
                 errback(err);
               }
-            }
+            },
           );
 
           recvTransport.on("connectionstatechange", (state) => {
@@ -104,14 +129,14 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producers }) => {
           });
 
           resolve(recvTransport);
-        }
+        },
       );
     });
   };
 
   const connectRecvTransport = async (
     transport: mediasoupClient.types.Transport,
-    producerId: string
+    producerId: string,
   ): Promise<mediasoupClient.types.Consumer> => {
     return new Promise((resolve, reject) => {
       socket.emit(
@@ -119,6 +144,7 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producers }) => {
         {
           rtpCapabilities: device.rtpCapabilities,
           producerId,
+          transportId: transport.id,
         },
         async ({ params }: any) => {
           if (params?.error) {
@@ -134,7 +160,7 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producers }) => {
             });
 
             consumer.on("transportclose", () =>
-              console.log("Consumer transport closed")
+              console.log("Consumer transport closed"),
             );
 
             socket.emit("consumerResume", { consumerId: consumer.id });
@@ -143,7 +169,7 @@ const RemoteStream: React.FC<Props> = ({ socket, device, producers }) => {
           } catch (error: any) {
             reject(error);
           }
-        }
+        },
       );
     });
   };

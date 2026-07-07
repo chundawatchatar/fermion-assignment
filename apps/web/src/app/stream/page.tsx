@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import * as mediasoupClient from "mediasoup-client";
 import StreamOutput from "@/components/StreamOutput";
 import RemoteStream from "@/components/RemoteStream";
-import io from "socket.io-client";
+import { io, Socket } from "socket.io-client";
 import { Camera, Mic, MicOff, CameraOff } from "lucide-react";
 
 // Define RemoteProducer type
@@ -13,13 +13,20 @@ type RemoteProducer = {
   producers: { id: string; kind: "audio" | "video" }[];
 };
 
+const iceServers: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+];
+
 const MediasoupClientComponent = () => {
-  const socket = useRef(
-    io("http://localhost:3001", {
+  const socketRef = useRef<Socket | null>(null);
+  if (!socketRef.current) {
+    socketRef.current = io("http://localhost:3001", {
       path: "/ws",
       transports: ["websocket"],
-    })
-  ).current;
+    });
+  }
+  const socket = socketRef.current;
 
   const deviceRef = useRef<mediasoupClient.Device | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -28,17 +35,6 @@ const MediasoupClientComponent = () => {
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [isConnecting, setIsConnecting] = useState(false);
-
-  const params = {
-    encodings: [
-      { rid: "r0", maxBitrate: 100_000, scalabilityMode: "S1T3" },
-      { rid: "r1", maxBitrate: 300_000, scalabilityMode: "S1T3" },
-      { rid: "r2", maxBitrate: 900_000, scalabilityMode: "S1T3" },
-    ],
-    codecOptions: {
-      videoGoogleStartBitrate: 1000,
-    },
-  };
 
   const addSocketListeners = () => {
     const handleNewProducer = ({ producers, socketId }) => {
@@ -100,12 +96,21 @@ const MediasoupClientComponent = () => {
 
       deviceRef.current = device;
 
-      const videoParams = { track: localStream.getVideoTracks()[0], ...params };
-      const audioParams = { track: localStream.getAudioTracks()[0] };
+      const videoTrack = localStream.getVideoTracks()[0];
+      const audioTrack = localStream.getAudioTracks()[0];
+
+      if (!videoTrack) {
+        throw new Error("No video track available");
+      }
+
+      const videoParams = { track: videoTrack };
+      const audioParams = audioTrack ? { track: audioTrack } : null;
 
       const sendTransport = await createSendTransport(device);
+      if (audioParams) {
+        await connectSendTransport(sendTransport, audioParams);
+      }
       await connectSendTransport(sendTransport, videoParams);
-      await connectSendTransport(sendTransport, audioParams);
 
       setIsJoined(true);
       console.log("Successfully joined the room");
@@ -154,7 +159,10 @@ const MediasoupClientComponent = () => {
             return;
           }
 
-          const sendTransport = device.createSendTransport(serverParams);
+          const sendTransport = device.createSendTransport({
+            ...serverParams,
+            iceServers,
+          });
 
           sendTransport.on(
             "connect",
@@ -165,7 +173,7 @@ const MediasoupClientComponent = () => {
               } catch (error: any) {
                 errback(error);
               }
-            }
+            },
           );
 
           sendTransport.on("produce", (parameters, callback, errback) => {
@@ -182,7 +190,7 @@ const MediasoupClientComponent = () => {
                 } else {
                   callback({ id });
                 }
-              }
+              },
             );
           });
 
@@ -191,14 +199,14 @@ const MediasoupClientComponent = () => {
           });
 
           resolve(sendTransport);
-        }
+        },
       );
     });
   };
 
   const connectSendTransport = async (
     sendTransport: any,
-    transportParams: any
+    transportParams: any,
   ) => {
     try {
       const producer = await sendTransport.produce(transportParams);
@@ -214,6 +222,7 @@ const MediasoupClientComponent = () => {
       console.log("Producer created:", producer.id, producer.kind);
     } catch (error) {
       console.error("Error connecting send transport:", error);
+      throw error;
     }
   };
 

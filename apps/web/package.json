@@ -6,13 +6,14 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "typecheck": "next build"
   },
   "dependencies": {
     "hls.js": "^1.6.7",
     "html2canvas": "^1.4.1",
     "lucide-react": "^0.533.0",
-    "mediasoup-client": "^3.12.5",
+    "mediasoup-client": "^3.21.0",
     "next": "15.4.3",
     "react": "19.1.0",
     "react-dom": "19.1.0",

@@ -1,4 +1,3 @@
-
 # Fermion Assignment
 
 ## Overview
@@ -20,12 +19,14 @@ This project is a full-stack WebRTC streaming platform built with Next.js and Ex
 ## Getting Started
 
 1. **Clone the repo**
+
    ```bash
    git clone https://github.com/chundawatchatar/fermion-assignment.git
    cd fermion-assignment
    ```
 
 2. **Install dependencies**
+
    ```bash
    pnpm install
    ```
